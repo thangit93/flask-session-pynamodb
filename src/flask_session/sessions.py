@@ -9,7 +9,7 @@ except ImportError:
     import pickle
 
 from flask.sessions import SessionInterface as FlaskSessionInterface
-from flask.sessions import SessionMixin
+from flask.sessions import SessionMixin, TaggedJSONSerializer
 from werkzeug.datastructures import CallbackDict
 from itsdangerous import Signer, BadSignature, want_bytes
 
@@ -56,6 +56,9 @@ class MongoDBSession(ServerSideSession):
 
 
 class SqlAlchemySession(ServerSideSession):
+    pass
+
+class DynamoDBSession(ServerSideSession):
     pass
 
 
@@ -614,3 +617,115 @@ class SqlAlchemySessionInterface(SessionInterface):
             secure=secure,
             **conditional_cookie_kwargs,
         )
+
+class DynamoDBSessionInterface(SessionInterface):
+    """Uses the AWS DyanmoDB key-value store as a session backend.
+
+    :param session: A ``boto3.Session`` instance.
+    :param key_prefix: A prefix that is added to all DynamoDB store keys.
+    :param use_signer: Whether to sign the session id cookie or not.
+    :param permanent: Whether to use permanent session or not.
+    """
+
+    session_class = DynamoDBSession
+    serializer = TaggedJSONSerializer()
+
+    def __init__(self, session, key_prefix, table_name, aws_access_key_id=None,
+                 aws_secret_access_key=None, region=None, endpoint_url=None, use_signer=False, permanent=True):
+        if session is None:
+            import boto3
+            session = boto3.Session(aws_access_key_id=aws_access_key_id, aws_secret_access_key=aws_secret_access_key,
+                                    region_name=region)
+        self.client = session.client('dynamodb', endpoint_url=endpoint_url)
+        self.key_prefix = key_prefix
+        self.use_signer = use_signer
+        self.permanent = permanent
+
+        if table_name not in self.client.list_tables().get(u'TableNames'):
+            raise RuntimeError("The table {0!s} does not exist in DynamoDB for the requested region of {1!s}. Please "
+                               "ensure that the table has a PrimaryKey of \"SessionID\"".format(
+                                table_name,
+                                session.region_name
+                                ))
+
+        self.table_name = table_name
+
+    def open_session(self, app, request):
+        sid = request.cookies.get(app.config["SESSION_COOKIE_NAME"])
+        if not sid:
+            sid = self._generate_sid()
+            return self.session_class(sid=sid, permanent=self.permanent)
+        if self.use_signer:
+            signer = self._get_signer(app)
+            if signer is None:
+                return None
+            try:
+                sid_as_bytes = signer.unsign(sid)
+                sid = sid_as_bytes.decode()
+            except BadSignature:
+                sid = self._generate_sid()
+                return self.session_class(sid=sid, permanent=self.permanent)
+
+        if not PY2 and not isinstance(sid, text_type):
+            sid = sid.decode('utf-8', 'strict')
+
+        response = self.client.get_item(
+            TableName=self.table_name,
+            Key={
+                'SessionId': {
+                    'S': self.key_prefix + sid
+                }
+            }
+        )
+
+        val = response.get(u'Item', {}).get('Session', {}).get(u'S')
+        if val is not None:
+            try:
+                data = self.serializer.loads(val)
+                return self.session_class(data, sid=sid)
+            except:
+                return self.session_class(sid=sid, permanent=self.permanent)
+        return self.session_class(sid=sid, permanent=self.permanent)
+
+    def save_session(self, app, session, response):
+        domain = self.get_cookie_domain(app)
+        path = self.get_cookie_path(app)
+        if not session:
+            if session.modified:
+                self.client.delete_item(
+                    TableName=self.table_name,
+                    Key={
+                        'SessionId': {
+                            'S': self.key_prefix + session.sid
+                        }
+                    }
+                )
+                response.delete_cookie(app.config["SESSION_COOKIE_NAME"],
+                                       domain=domain, path=path)
+            return
+
+        httponly = self.get_cookie_httponly(app)
+        secure = self.get_cookie_secure(app)
+        expires = self.get_expiration_time(app, session)
+        val = self.serializer.dumps(dict(session))
+        print(val)
+
+        self.client.put_item(
+            TableName=self.table_name,
+            Item={
+                'SessionId': {
+                    'S': self.key_prefix + session.sid
+                },
+                'Session': {
+                    'S': val
+                }
+            }
+        )
+
+        if self.use_signer:
+            session_id = self._get_signer(app).sign(want_bytes(session.sid))
+        else:
+            session_id = session.sid
+        response.set_cookie(app.config["SESSION_COOKIE_NAME"], session_id,
+                            expires=expires, httponly=httponly,
+                            domain=domain, path=path, secure=secure)

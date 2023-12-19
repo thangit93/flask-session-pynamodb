@@ -7,9 +7,10 @@ from .sessions import (
     FileSystemSessionInterface,
     MongoDBSessionInterface,
     SqlAlchemySessionInterface,
+    DynamoDBSessionInterface
 )
 
-__version__ = "0.5.0"
+__version__ = "0.1.0"
 
 
 class Session(object):
@@ -72,6 +73,12 @@ class Session(object):
         config.setdefault("SESSION_MONGODB_COLLECT", "sessions")
         config.setdefault("SESSION_SQLALCHEMY", None)
         config.setdefault("SESSION_SQLALCHEMY_TABLE", "sessions")
+        config.setdefault('SESSION_DYNAMODB', None)
+        config.setdefault('SESSION_DYNAMODB_TABLE', 'sessions')
+        config.setdefault('SESSION_DYNAMODB_KEY_ID', None)
+        config.setdefault('SESSION_DYNAMODB_SECRET', None)
+        config.setdefault('SESSION_DYNAMODB_REGION', None)
+        config.setdefault('SESSION_DYNAMODB_ENDPOINT_URL', None)
 
         if config["SESSION_TYPE"] == "redis":
             session_interface = RedisSessionInterface(
@@ -114,6 +121,13 @@ class Session(object):
                 config["SESSION_USE_SIGNER"],
                 config["SESSION_PERMANENT"],
             )
+        elif config['SESSION_TYPE'] == 'dynamodb':
+            session_interface = DynamoDBSessionInterface(
+            config['SESSION_DYNAMODB'], config['SESSION_KEY_PREFIX'],
+            config['SESSION_DYNAMODB_TABLE'], config['SESSION_DYNAMODB_KEY_ID'],
+            config['SESSION_DYNAMODB_SECRET'], config['SESSION_DYNAMODB_REGION'],
+            config['SESSION_DYNAMODB_ENDPOINT_URL'],
+            config['SESSION_USE_SIGNER'], config['SESSION_PERMANENT'])
         else:
             session_interface = NullSessionInterface()
 
